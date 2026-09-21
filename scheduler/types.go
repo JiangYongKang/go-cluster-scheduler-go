@@ -1,0 +1,217 @@
+// Package scheduler 实现一个纯本地、可模拟的批处理集群调度器。
+//
+// 它以模拟节点与内存状态刻画作业从提交到结束的完整生命周期，
+// 支持成组调度（gang）、GPU/NUMA/亲和性拓扑匹配、优先级与公平共享
+// 抢占、节点故障恢复以及多维资源配额核算。
+package scheduler
+
+import "time"
+
+// Resources 是可比较的标量资源向量。
+type Resources struct {
+	CPU    int64
+	Memory int64
+	GPU    int64
+}
+
+// LabelSelector 是简单的相等/不相等标签选择器。
+type LabelSelector struct {
+	MatchLabels    map[string]string // 候选节点必须全部相等
+	NoScheduleKeys []string          // 候选节点上这些 key 不得存在
+}
+
+// Affinity 描述节点亲和/反亲和。
+type Affinity struct {
+	Required         *LabelSelector // 硬性要求：不满足则排除
+	Preferred        *LabelSelector // 软性偏好：仅影响候选排序
+	AntiAffinityWith []string       // 反亲和作业 ID：其运行任务所在节点必须排除
+}
+
+// GPUDevice 描述一块 GPU 设备。
+type GPUDevice struct {
+	ID     string
+	NUMAID int
+}
+
+// NUMAZone 描述一个 NUMA 域上的局部资源。
+type NUMAZone struct {
+	ID   int
+	CPUs int64
+	Mem  int64
+	GPUs []string // 该域上的 GPU 设备 ID
+}
+
+// NodeSpec 描述一个模拟节点。
+type NodeSpec struct {
+	Name     string
+	CPU      int64
+	Memory   int64
+	GPUs     []GPUDevice
+	NUMA     []NUMAZone // 为空表示不感知 NUMA
+	Labels   map[string]string
+	MaxTasks int // 0 表示不限
+}
+
+// NodeState 是节点生命周期状态。
+type NodeState int
+
+const (
+	NodeReady NodeState = iota
+	NodeDrained
+	NodeLost
+)
+
+func (n NodeState) String() string {
+	switch n {
+	case NodeReady:
+		return "Ready"
+	case NodeDrained:
+		return "Drained"
+	case NodeLost:
+		return "Lost"
+	default:
+		return "Unknown"
+	}
+}
+
+// TaskSpec 描述作业中的单个任务。
+type TaskSpec struct {
+	Name      string
+	Resources Resources
+	NUMAID    int    // >=0 时要求任务资源落在指定 NUMA 域；GPU 与其同域
+	GPUDevice string // 非空时要求指定 GPU 设备；为空且申请 GPU 时任意匹配
+}
+
+// JobSpec 描述一个作业（或作业数组）。
+type JobSpec struct {
+	ID         string
+	User       string
+	Queue      string
+	Priority   int
+	Tasks      []TaskSpec // 作业数组：全部任务成组调度
+	MaxRetries int        // 节点失联导致的任务级重试上限
+	Affinity   Affinity
+}
+
+// TaskState 是任务状态。
+type TaskState int
+
+const (
+	TaskPending TaskState = iota
+	TaskRunning
+	TaskPreempted
+	TaskFailed
+	TaskFinished
+)
+
+func (t TaskState) String() string {
+	switch t {
+	case TaskPending:
+		return "Pending"
+	case TaskRunning:
+		return "Running"
+	case TaskPreempted:
+		return "Preempted"
+	case TaskFailed:
+		return "Failed"
+	case TaskFinished:
+		return "Finished"
+	default:
+		return "Unknown"
+	}
+}
+
+// JobState 是作业聚合状态。
+type JobState int
+
+const (
+	JobPending JobState = iota
+	JobRunning
+	JobPartialFailure
+	JobFinished
+	JobCanceled
+)
+
+func (j JobState) String() string {
+	switch j {
+	case JobPending:
+		return "Pending"
+	case JobRunning:
+		return "Running"
+	case JobPartialFailure:
+		return "PartialFailure"
+	case JobFinished:
+		return "Finished"
+	case JobCanceled:
+		return "Canceled"
+	default:
+		return "Unknown"
+	}
+}
+
+// Reason 是调度/拒绝/故障原因的可区分归类。
+type Reason string
+
+// RejectReason 是提交/调度拒绝原因码。
+type RejectReason string
+
+const (
+	ReasonOK RejectReason = "OK"
+)
+
+// DecisionKind 标识调度决策类型。
+type DecisionKind string
+
+// Decision 记录一次可解释的调度判定。
+type Decision struct {
+	At     time.Time
+	Kind   DecisionKind
+	JobID  string
+	TaskID string
+	Node   string
+	Reason string
+	Detail string
+}
+
+// QuotaConfig 描述用户/队列维度配额。
+type QuotaConfig struct {
+	UserQueues   map[string][]string // user -> 允许的队列
+	UserQuota    map[string]Resources
+	QueueQuota   map[string]Resources
+	MaxJobsTotal int // <=0 表示不限
+}
+
+// Config 描述调度器上限与公平性参数。
+type Config struct {
+	MaxPendingJobs  int            // 待调度作业总数上限，<=0 不限
+	MaxRunningTasks int            // 全局运行任务数上限，<=0 不限
+	MaxDecisionLog  int            // 决策日志保留条数，<=0 不保留
+	QueueMaxPending map[string]int // 队列待调度作业上限
+}
+
+// UsageSnapshot 是某一时刻的资源核算快照。
+type UsageSnapshot struct {
+	At        time.Time
+	Running   Resources // 当前运行中占用
+	Allocated Resources // 运行中 + 被抢占/待重试任务的预留份额
+	Users     map[string]Resources
+	Queues    map[string]Resources
+	UserJobs  map[string]int
+}
+
+func (r Resources) add(o Resources) Resources {
+	return Resources{CPU: r.CPU + o.CPU, Memory: r.Memory + o.Memory, GPU: r.GPU + o.GPU}
+}
+
+func (r Resources) sub(o Resources) Resources {
+	return Resources{CPU: r.CPU - o.CPU, Memory: r.Memory - o.Memory, GPU: r.GPU - o.GPU}
+}
+
+// fitsIn 判断 r 是否可被 o 容纳（各维度均不超过）。
+func (r Resources) fitsIn(o Resources) bool {
+	return r.CPU <= o.CPU && r.Memory <= o.Memory && r.GPU <= o.GPU
+}
+
+func (r Resources) nonZero() bool {
+	return r.CPU != 0 || r.Memory != 0 || r.GPU != 0
+}
