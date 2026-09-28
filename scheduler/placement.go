@@ -146,12 +146,33 @@ func (s *Scheduler) filterNode(n *node, t TaskSpec, j *job, sim *simView, acc *n
 	if n.spec.MaxTasks > 0 && e.count+acc.count+1 > n.spec.MaxTasks {
 		reasons = append(reasons, FilterTaskCap)
 	}
-	// 指定 GPU 设备。
+	// 指定 GPU 设备：设备必须真实存在、空闲、且与资源域严格一致；
+	// 任何一条不满足都只报对应原因，绝不退回同节点其它设备或别的域。
 	if t.GPUDevice != "" {
 		if _, exists := gpuOnNode(n, t.GPUDevice); !exists {
 			reasons = append(reasons, FilterGPUAbsent)
-		} else if e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
-			reasons = append(reasons, FilterGPUBusy)
+		} else {
+			if e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
+				reasons = append(reasons, FilterGPUBusy)
+			}
+			// 设备的资源域归属必须与申请域一致：
+			//   指定 NUMAID 时设备必须属于该域；
+			//   NUMA 节点上未指定 NUMAID 时，CPU/内存/GPU 仍必须同域，
+			//   设备只属于其归属域，不允许落到别的域或节点总量账本。
+			if len(n.spec.NUMA) > 0 {
+				if zid, ok := gpuZone(n, t.GPUDevice); !ok {
+					reasons = append(reasons, FilterGPUAbsent)
+				} else if t.NUMAID >= 0 && zid != t.NUMAID {
+					reasons = append(reasons, FilterGPUZoneMismatch)
+				} else if t.NUMAID < 0 {
+					// 未指定域：设备归属域即唯一资源域，CPU/内存须同域容纳。
+					z := zoneByID(n, zid)
+					if e.zoneCPU[zid]+acc.zoneCPU[zid]+t.Resources.CPU > z.CPUs ||
+						e.zoneMem[zid]+acc.zoneMem[zid]+t.Resources.Memory > z.Mem {
+						reasons = append(reasons, FilterNUMAExhaust)
+					}
+				}
+			}
 		}
 	}
 	// NUMA 域约束。
@@ -170,9 +191,15 @@ func (s *Scheduler) filterNode(n *node, t TaskSpec, j *job, sim *simView, acc *n
 				gid := t.GPUDevice
 				if gid == "" {
 					gid = pickFreeGPU(n, t.NUMAID, e, acc)
+				} else if zid, ok := gpuZone(n, gid); !ok || zid != t.NUMAID {
+					// 钉了设备但设备不在该域：域不一致，已在上方钉设备分支
+					// 记 GPU_ZONE_MISMATCH；这里不再挑别的卡。
+					gid = ""
+				} else if e.busyGPU[gid] || acc.gpus[gid] {
+					gid = "" // 占用原因已在钉设备分支记录
 				}
-				if gid == "" {
-					// 区分：设备不存在于该域 vs 域内全部繁忙。
+				if gid == "" && t.GPUDevice == "" {
+					// 未钉设备：区分域内无设备 vs 域内全部繁忙。
 					if len(z.GPUs) == 0 {
 						reasons = append(reasons, FilterGPUAbsent)
 					} else {
@@ -256,7 +283,31 @@ func (s *Scheduler) placementChoices(n *node, t TaskSpec, sim *simView, acc *nod
 				return nil
 			}
 		}
+		if t.Resources.GPU == 1 && gid != "" {
+			// 钉设备：设备必须恰好属于该域且空闲，否则该节点无可行放置。
+			zid, ok := gpuZone(n, gid)
+			if !ok || zid != t.NUMAID || e.busyGPU[gid] || acc.gpus[gid] {
+				return nil
+			}
+		}
 		return []placeOn{{n: n, numaID: t.NUMAID, gpu: gid}}
+	}
+	// NUMA 节点上钉了设备但未指定域：唯一合法放置是设备的归属域，
+	// CPU/内存与 GPU 必须同域；不枚举其它域，更不回退到别的设备。
+	if t.Resources.GPU == 1 && t.GPUDevice != "" && len(n.spec.NUMA) > 0 {
+		zid, ok := gpuZone(n, t.GPUDevice)
+		if !ok {
+			return nil
+		}
+		z := zoneByID(n, zid)
+		if z == nil || e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
+			return nil
+		}
+		if e.zoneCPU[zid]+acc.zoneCPU[zid]+t.Resources.CPU > z.CPUs ||
+			e.zoneMem[zid]+acc.zoneMem[zid]+t.Resources.Memory > z.Mem {
+			return nil
+		}
+		return []placeOn{{n: n, numaID: zid, gpu: t.GPUDevice}}
 	}
 	// 申请 GPU、不钉 NUMA：NUMA 节点逐域枚举，非 NUMA 节点取第一块空闲卡。
 	if len(n.spec.NUMA) > 0 {
@@ -412,6 +463,19 @@ func gpuOnNode(n *node, id string) (GPUDevice, bool) {
 		}
 	}
 	return GPUDevice{}, false
+}
+
+// gpuZone 返回设备在该 NUMA 节点上的归属域 ID；非 NUMA 节点或设备不存在时 ok=false。
+// 域归属以 NUMAZone.GPUs 的互引关系为准（validateNode 保证每块设备恰属一域）。
+func gpuZone(n *node, id string) (int, bool) {
+	for i := range n.spec.NUMA {
+		for _, gid := range n.spec.NUMA[i].GPUs {
+			if gid == id {
+				return n.spec.NUMA[i].ID, true
+			}
+		}
+	}
+	return 0, false
 }
 
 func zoneByID(n *node, id int) *NUMAZone {

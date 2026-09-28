@@ -87,7 +87,10 @@ type task struct {
 	retries   int
 	startedAt time.Time
 	runtime   time.Duration // 已结算（完成/被抢占/失联）的累计运行时长
-	term      TerminalReason
+	// rt 为按终局原因分桶的已结运行时段资源时间；当前运行时段在查询时
+	// 按 startedAt..now 即时计算，不提前入账，避免重复或漏记。
+	rt   ResourceTimeBuckets
+	term TerminalReason
 }
 
 // job 是作业的内部可变状态。

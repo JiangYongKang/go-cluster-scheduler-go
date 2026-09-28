@@ -1,23 +1,60 @@
 package scheduler
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // 公平共享与抢占。
 //
 // 调度排序：优先级降序 -> 用户归一化份额升序 -> 提交序升序 -> ID 升序。
-// 归一化份额 = 用户 allocated（运行 + 预留）的标量值 / 权重（权重恒为 1，
-// 即所有用户等权；预留份额也计入，防止“被抢占越多越优先”的作弊）。
+// 归一化份额 = 用户 allocated（运行 + 预留）的标量值 / 权重（权重缺省为 1）；
+// 预留份额也计入，防止“被抢占越多越优先”的作弊。注意这里用的是瞬时持有份额
+// 而非累计消耗：被抢占后正在等待重启的作业不持有运行份额以外的额外债务，
+// 不会因为历史消耗多（结算后剩余份额少）而一直被压着起不来。
 //
 // 抢占只允许针对严格更低优先级且仍在运行的任务；按整作业粒度贪心选取，
-// 找到可行集合后再做最小化剪枝。抢占不改变任何用户的 allocated 总量
-// （运行份额转为等量预留），因此配额冲突无法、也不会通过抢占绕过。
+// 找到可行集合后再做最小化剪枝。同优先级候选受害者之间按“已消耗资源份额”
+// 排序：累计消耗的资源时间越多、按用户/队列权重归一化后份额越大的作业越先
+// 被让出，避免“占得久、耗得多反而最安全”。抢占不改变任何用户的 allocated
+// 总量（运行份额转为等量预留），因此配额冲突无法、也不会通过抢占绕过。
 
 func shareValue(r Resources) float64 {
 	return float64(r.CPU) + float64(r.Memory)/1024.0 + float64(r.GPU)*1024.0
 }
 
+// rtValue 是资源时间的标量值（量纲与 shareValue×时长 对应）。
+func rtValue(rt ResourceTime) float64 {
+	return float64(rt.CPUNanos) + float64(rt.MemoryNanos)/1024.0 + float64(rt.GPUNanos)*1024.0
+}
+
+func (s *Scheduler) userWeight(user string) float64 {
+	if w, ok := s.quota.UserWeights[user]; ok && w > 0 {
+		return w
+	}
+	return 1
+}
+
+func (s *Scheduler) queueWeight(queue string) float64 {
+	if w, ok := s.quota.QueueWeights[queue]; ok && w > 0 {
+		return w
+	}
+	return 1
+}
+
 func (s *Scheduler) normalizedShare(user string) float64 {
-	return shareValue(s.userAllocated(user))
+	return shareValue(s.userAllocated(user)) / s.userWeight(user)
+}
+
+// consumedShare 返回作业到 at 为止累计消耗资源时间按用户/队列权重归一化后
+// 的份额：已结时段（完成/被抢占/取消/失败各桶）加当前仍在运行的时段。
+// 同一作业多次被抢占、被抢占后重启的运行时间按段累加，既不重复也不漏记。
+func (s *Scheduler) consumedShare(j *job, at time.Time) float64 {
+	var sum ResourceTime
+	for _, t := range j.tasks {
+		sum = sum.add(taskBucketsLocked(t, at).Total)
+	}
+	return rtValue(sum) / (s.userWeight(j.spec.User) * s.queueWeight(j.spec.Queue))
 }
 
 // schedulableJobs 返回存在待启动（排队/被抢占/待重试）任务且未终态的作业。
@@ -78,18 +115,19 @@ func (s *Scheduler) preemptVictims(j *job) (map[*task]placeOn, map[*job]bool, Re
 			candidates = append(candidates, v)
 		}
 	}
-	// 受害者选择顺序：低优先级优先 -> 运行任务少（少扰动）-> 新作业优先 -> ID。
+	// 受害者选择顺序：
+	//  1. 低优先级优先（仅严格更低优先级候选会进入此列表）；
+	//  2. 同优先级内按“已消耗资源份额”降序：累计资源时间（按用户/队列权重
+	//     归一化）越大的作业越先让出，长跑多耗者不再最安全；
+	//  3. 份额相同按作业 ID 升序，保证确定性。
 	sort.SliceStable(candidates, func(a, b int) bool {
 		va, vb := candidates[a], candidates[b]
 		if va.spec.Priority != vb.spec.Priority {
 			return va.spec.Priority < vb.spec.Priority
 		}
-		na, nb := len(runningTasksOf(va)), len(runningTasksOf(vb))
-		if na != nb {
-			return na < nb
-		}
-		if va.submitSeq != vb.submitSeq {
-			return va.submitSeq > vb.submitSeq
+		ca, cb := s.consumedShare(va, s.now), s.consumedShare(vb, s.now)
+		if ca != cb {
+			return ca > cb
 		}
 		return va.spec.ID < vb.spec.ID
 	})

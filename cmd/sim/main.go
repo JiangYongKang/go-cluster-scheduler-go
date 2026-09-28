@@ -9,6 +9,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/highcumontoa/go-cluster-scheduler-go/scheduler"
@@ -89,6 +90,9 @@ func main() {
 	must(s.CancelJob("job-bulk"))
 	printSnapshot(s)
 
+	fmt.Println("\n== 累计资源时间（运行/完成/取消/失败/抢占，单位：CPU·纳秒） ==")
+	printResourceTimes(s)
+
 	fmt.Println("\n== 决策日志（最后 25 条） ==")
 	d := s.Decisions()
 	start := 0
@@ -145,4 +149,26 @@ func printSnapshot(s *scheduler.Scheduler) {
 	snap := s.Snapshot()
 	fmt.Printf("  SNAP    running=cpu%d allocated=cpu%d users=%v queues=%v\n",
 		snap.Running.CPU, snap.Allocated.CPU, snap.Users, snap.Queues)
+}
+
+// printResourceTimes 按作业打印五桶资源时间，并校验五桶之和等于总量。
+func printResourceTimes(s *scheduler.Scheduler) {
+	rpt := s.ResourceTimes()
+	keys := make([]string, 0, len(rpt.Jobs))
+	for k := range rpt.Jobs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, id := range keys {
+		b := rpt.Jobs[id].Buckets
+		sum := b.Running.CPUNanos + b.Finished.CPUNanos + b.Canceled.CPUNanos +
+			b.Failed.CPUNanos + b.Preempted.CPUNanos
+		flag := "OK"
+		if sum != b.Total.CPUNanos {
+			flag = "MISMATCH"
+		}
+		fmt.Printf("  RTJOB   %-10s run=%d fin=%d cancel=%d fail=%d preempt=%d total=%d [%s]\n",
+			id, b.Running.CPUNanos, b.Finished.CPUNanos, b.Canceled.CPUNanos,
+			b.Failed.CPUNanos, b.Preempted.CPUNanos, b.Total.CPUNanos, flag)
+	}
 }

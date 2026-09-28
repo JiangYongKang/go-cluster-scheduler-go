@@ -226,7 +226,8 @@ func undoNodeCommit(n *node, t TaskSpec, op placeOn) {
 
 // settleTask 结算任务自上次启动以来的运行时段到累计运行时。
 // 只做时长结算，不修改任务状态或资源记账；返回本次结算的时段长度。
-// 多次抢占各结算各的时段，累计相加，既不重复也不丢失。
+// 同时把该时段的资源时间按终局原因计入唯一分桶（被抢占/取消/完成/失联
+// 各归各桶），多次抢占各结算各的时段，累计相加，既不重复也不丢失。
 func (s *Scheduler) settleTask(j *job, t *task, at time.Time, reason TerminalReason) time.Duration {
 	var seg time.Duration
 	if !t.startedAt.IsZero() {
@@ -239,6 +240,9 @@ func (s *Scheduler) settleTask(j *job, t *task, at time.Time, reason TerminalRea
 		}
 		t.runtime += seg
 		t.startedAt = time.Time{}
+	}
+	if seg > 0 {
+		t.rt.addSettled(reason, resourceTimeOf(t.spec.Resources, seg))
 	}
 	t.term = reason
 	return seg

@@ -178,7 +178,9 @@ type QuotaConfig struct {
 	UserQueues   map[string][]string // user -> 允许的队列
 	UserQuota    map[string]Resources
 	QueueQuota   map[string]Resources
-	MaxJobsTotal int // <=0 表示不限
+	UserWeights  map[string]float64 // 用户公平权重；缺省（<=0）视为 1
+	QueueWeights map[string]float64 // 队列公平权重；缺省（<=0）视为 1
+	MaxJobsTotal int                // <=0 表示不限
 }
 
 // Config 描述调度器上限与公平性参数。
