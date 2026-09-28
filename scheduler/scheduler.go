@@ -40,6 +40,9 @@ type PreemptionRecord struct {
 	Node            string
 	SettledRuntime  time.Duration
 	ReturnedShare   Resources
+	// SamePriority 为 true 表示这是同优先级按已消耗份额发起的公平抢占；
+	// false 表示严格高优先级抢占。
+	SamePriority bool
 }
 
 // UnschedulableJob 描述本周期无法启动的作业及可区分原因。
@@ -60,6 +63,8 @@ type TaskInfo struct {
 	Retries    int
 	TermReason TerminalReason
 	Runtime    time.Duration // 已结算累计运行时长
+	// ResourceTime 为该任务五类资源时间（查询时刻的运行段实时计入 Running）。
+	ResourceTime ResourceTimeBreakdown
 }
 
 // JobInfo 是作业的只读视图（数组维度汇总）。
@@ -88,6 +93,11 @@ type task struct {
 	startedAt time.Time
 	runtime   time.Duration // 已结算（完成/被抢占/失联）的累计运行时长
 	term      TerminalReason
+	// 已结算段资源时间，按离场原因分桶；未结算的运行段在查询时实时计算。
+	rtFinished  ResourceTime
+	rtCanceled  ResourceTime
+	rtFailed    ResourceTime
+	rtPreempted ResourceTime
 }
 
 // job 是作业的内部可变状态。
@@ -390,6 +400,7 @@ func (s *Scheduler) GetJob(id string) *JobInfo {
 		info.Tasks = append(info.Tasks, TaskInfo{
 			Name: t.spec.Name, State: t.state, Node: t.node, NUMAID: t.numaID,
 			GPU: t.gpu, Retries: t.retries, TermReason: t.term, Runtime: t.runtime,
+			ResourceTime: taskBreakdownLocked(t, s.now),
 		})
 		switch t.state {
 		case TaskPending:
@@ -475,7 +486,11 @@ func (s *Scheduler) applyPreemptions(victims map[*job]bool, winner *job, rpt *Sc
 	}
 	sort.Slice(vlist, func(a, b int) bool { return vlist[a].spec.ID < vlist[b].spec.ID })
 	for _, v := range vlist {
-		rec := PreemptionRecord{PreemptedJobID: v.spec.ID, PreemptingJobID: winner.spec.ID}
+		rec := PreemptionRecord{
+			PreemptedJobID:  v.spec.ID,
+			PreemptingJobID: winner.spec.ID,
+			SamePriority:    v.spec.Priority == winner.spec.Priority,
+		}
 		for _, t := range v.tasks {
 			if t.state != TaskRunning {
 				continue

@@ -241,6 +241,7 @@ func (s *Scheduler) settleTask(j *job, t *task, at time.Time, reason TerminalRea
 		t.startedAt = time.Time{}
 	}
 	t.term = reason
+	accrueSettled(t, seg) // 段结束原因唯一决定资源时间桶，重启动后只新增段
 	return seg
 }
 

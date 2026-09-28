@@ -89,6 +89,20 @@ func main() {
 	must(s.CancelJob("job-bulk"))
 	printSnapshot(s)
 
+	fmt.Println("\n== 7. 资源时间视角（运行/完成/取消/失败/被抢占 五类，五桶之和=总量） ==")
+	rt := s.ResourceTimes()
+	fmt.Printf("  RT total    run=%s fin=%s cancel=%s fail=%s preempt=%s\n",
+		rt.Total.Running.CPU, rt.Total.Finished.CPU, rt.Total.Canceled.CPU,
+		rt.Total.Failed.CPU, rt.Total.Preempted.CPU)
+	for _, id := range []string{"job-gpu", "job-bulk", "job-urgent"} {
+		if j, ok := rt.Jobs[id]; ok {
+			b := j.Breakdown
+			fmt.Printf("  RT job=%-10s run=%s fin=%s cancel=%s fail=%s preempt=%s (total=%s)\n",
+				id, b.Running.CPU, b.Finished.CPU, b.Canceled.CPU,
+				b.Failed.CPU, b.Preempted.CPU, b.Total.CPU)
+		}
+	}
+
 	fmt.Println("\n== 决策日志（最后 25 条） ==")
 	d := s.Decisions()
 	start := 0

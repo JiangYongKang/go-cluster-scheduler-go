@@ -146,12 +146,18 @@ func (s *Scheduler) filterNode(n *node, t TaskSpec, j *job, sim *simView, acc *n
 	if n.spec.MaxTasks > 0 && e.count+acc.count+1 > n.spec.MaxTasks {
 		reasons = append(reasons, FilterTaskCap)
 	}
-	// 指定 GPU 设备。
+	// 指定 GPU 设备：必须真的存在于该节点；若同时指定 NUMA 域，
+	// 设备还必须属于该域。任何对不上都以独立原因排除节点，
+	// 绝不退回同节点的其它设备或其它域。
 	if t.GPUDevice != "" {
-		if _, exists := gpuOnNode(n, t.GPUDevice); !exists {
+		g, exists := gpuOnNode(n, t.GPUDevice)
+		if !exists {
 			reasons = append(reasons, FilterGPUAbsent)
 		} else if e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
 			reasons = append(reasons, FilterGPUBusy)
+		}
+		if exists && t.NUMAID >= 0 && g.NUMAID != t.NUMAID {
+			reasons = append(reasons, FilterGPUZoneMismatch)
 		}
 	}
 	// NUMA 域约束。
@@ -168,11 +174,19 @@ func (s *Scheduler) filterNode(n *node, t TaskSpec, j *job, sim *simView, acc *n
 			}
 			if t.Resources.GPU == 1 {
 				gid := t.GPUDevice
+				zoneMismatch := false
 				if gid == "" {
 					gid = pickFreeGPU(n, t.NUMAID, e, acc)
+				} else if g, ok := gpuOnNode(n, gid); ok && g.NUMAID != t.NUMAID {
+					// 钉选设备存在但属于别的域：独立原因，不换设备/不跨域。
+					reasons = append(reasons, FilterGPUZoneMismatch)
+					zoneMismatch = true
+					gid = ""
+				} else if e.busyGPU[gid] || acc.gpus[gid] {
+					gid = ""
 				}
-				if gid == "" {
-					// 区分：设备不存在于该域 vs 域内全部繁忙。
+				if gid == "" && !zoneMismatch {
+					// 区分：域内无设备 vs 域内全部繁忙。
 					if len(z.GPUs) == 0 {
 						reasons = append(reasons, FilterGPUAbsent)
 					} else {
@@ -256,10 +270,36 @@ func (s *Scheduler) placementChoices(n *node, t TaskSpec, sim *simView, acc *nod
 				return nil
 			}
 		}
+		// 钉选设备不属于指定域：不提供任何跨域选项（无静默降级）。
+		if gid != "" {
+			if g, ok := gpuOnNode(n, gid); !ok || g.NUMAID != t.NUMAID {
+				return nil
+			}
+		}
 		return []placeOn{{n: n, numaID: t.NUMAID, gpu: gid}}
 	}
 	// 申请 GPU、不钉 NUMA：NUMA 节点逐域枚举，非 NUMA 节点取第一块空闲卡。
 	if len(n.spec.NUMA) > 0 {
+		// 钉了具体设备但没指定域：锚定到该设备实际所属的唯一域，
+		// 不枚举其它域，更不会换到别的设备。
+		if t.GPUDevice != "" {
+			g, ok := gpuOnNode(n, t.GPUDevice)
+			if !ok {
+				return nil
+			}
+			z := zoneByID(n, g.NUMAID)
+			if z == nil {
+				return nil
+			}
+			if e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
+				return nil
+			}
+			if e.zoneCPU[z.ID]+acc.zoneCPU[z.ID]+t.Resources.CPU > z.CPUs ||
+				e.zoneMem[z.ID]+acc.zoneMem[z.ID]+t.Resources.Memory > z.Mem {
+				return nil
+			}
+			return []placeOn{{n: n, numaID: g.NUMAID, gpu: t.GPUDevice}}
+		}
 		var out []placeOn
 		zones := append([]NUMAZone(nil), n.spec.NUMA...)
 		sort.Slice(zones, func(a, b int) bool { return zones[a].ID < zones[b].ID })
@@ -277,6 +317,16 @@ func (s *Scheduler) placementChoices(n *node, t TaskSpec, sim *simView, acc *nod
 		return out
 	}
 	if t.Resources.GPU == 1 {
+		// 非 NUMA 节点：钉选必须落在指定设备上，不选“第一块空闲卡”。
+		if t.GPUDevice != "" {
+			if _, ok := gpuOnNode(n, t.GPUDevice); !ok {
+				return nil
+			}
+			if e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
+				return nil
+			}
+			return []placeOn{{n: n, numaID: -1, gpu: t.GPUDevice}}
+		}
 		var ids []string
 		for _, g := range n.spec.GPUs {
 			if !e.busyGPU[g.ID] && !acc.gpus[g.ID] {

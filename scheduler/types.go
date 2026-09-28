@@ -173,12 +173,66 @@ type Decision struct {
 	Detail string
 }
 
-// QuotaConfig 描述用户/队列维度配额。
+// QuotaConfig 描述用户/队列维度配额与公平权重。
 type QuotaConfig struct {
 	UserQueues   map[string][]string // user -> 允许的队列
 	UserQuota    map[string]Resources
 	QueueQuota   map[string]Resources
-	MaxJobsTotal int // <=0 表示不限
+	UserWeight   map[string]float64 // 用户公平权重，缺省/<=0 视为 1
+	QueueWeight  map[string]float64 // 队列公平权重，缺省/<=0 视为 1
+	MaxJobsTotal int                // <=0 表示不限
+}
+
+// ResourceTime 是资源 × 时间的累计量（某一资源量持续了多久）。
+// 例如 2 CPU 运行 3s，则 CPU 字段为 6s。
+type ResourceTime struct {
+	CPU    time.Duration
+	Memory time.Duration
+	GPU    time.Duration
+}
+
+// addSegment 累加“r 持续 d”的一段资源时间。
+func (rt ResourceTime) addSegment(r Resources, d time.Duration) ResourceTime {
+	return ResourceTime{
+		CPU:    rt.CPU + time.Duration(r.CPU)*d,
+		Memory: rt.Memory + time.Duration(r.Memory)*d,
+		GPU:    rt.GPU + time.Duration(r.GPU)*d,
+	}
+}
+
+func (rt ResourceTime) add(o ResourceTime) ResourceTime {
+	return ResourceTime{CPU: rt.CPU + o.CPU, Memory: rt.Memory + o.Memory, GPU: rt.GPU + o.GPU}
+}
+
+// ResourceTimeBreakdown 按任务离场原因分桶的资源时间。
+// Running 为查询时刻仍在运行的未结算段；其余四类为已结算段。
+// Total = Running + Finished + Canceled + Failed + Preempted 恒成立。
+type ResourceTimeBreakdown struct {
+	Running   ResourceTime
+	Finished  ResourceTime
+	Canceled  ResourceTime
+	Failed    ResourceTime
+	Preempted ResourceTime
+	Total     ResourceTime
+}
+
+// JobResourceTime 是单个作业的资源时间视图。
+type JobResourceTime struct {
+	ID        string
+	User      string
+	Queue     string
+	Breakdown ResourceTimeBreakdown
+}
+
+// ResourceTimeView 是某一时刻按用户/队列/作业维度的资源时间一致快照。
+// 每个维度的五类分桶之和恒等于 Total；同一任务的同一段时间在任何维度
+// 都只计入一个桶，跨调度、抢占、取消、失败重试后守恒。
+type ResourceTimeView struct {
+	At     time.Time
+	Users  map[string]ResourceTimeBreakdown
+	Queues map[string]ResourceTimeBreakdown
+	Jobs   map[string]JobResourceTime
+	Total  ResourceTimeBreakdown
 }
 
 // Config 描述调度器上限与公平性参数。

@@ -24,16 +24,17 @@ const (
 type FilterReason string
 
 const (
-	FilterNodeNotReady  FilterReason = "NODE_NOT_READY"
-	FilterLabelMismatch FilterReason = "LABEL_MISMATCH"
-	FilterAntiAffinity  FilterReason = "ANTI_AFFINITY"
-	FilterCPU           FilterReason = "CPU_INSUFFICIENT"
-	FilterMemory        FilterReason = "MEMORY_INSUFFICIENT"
-	FilterGPUAbsent     FilterReason = "GPU_ABSENT"
-	FilterGPUBusy       FilterReason = "GPU_BUSY"
-	FilterNUMAAbsent    FilterReason = "NUMA_ZONE_ABSENT"
-	FilterNUMAExhaust   FilterReason = "NUMA_ZONE_EXHAUSTED"
-	FilterTaskCap       FilterReason = "NODE_TASK_CAP"
+	FilterNodeNotReady    FilterReason = "NODE_NOT_READY"
+	FilterLabelMismatch   FilterReason = "LABEL_MISMATCH"
+	FilterAntiAffinity    FilterReason = "ANTI_AFFINITY"
+	FilterCPU             FilterReason = "CPU_INSUFFICIENT"
+	FilterMemory          FilterReason = "MEMORY_INSUFFICIENT"
+	FilterGPUAbsent       FilterReason = "GPU_ABSENT"
+	FilterGPUBusy         FilterReason = "GPU_BUSY"
+	FilterGPUZoneMismatch FilterReason = "GPU_ZONE_MISMATCH" // 钉选设备存在但不属于任务指定的 NUMA 域
+	FilterNUMAAbsent      FilterReason = "NUMA_ZONE_ABSENT"
+	FilterNUMAExhaust     FilterReason = "NUMA_ZONE_EXHAUSTED"
+	FilterTaskCap         FilterReason = "NODE_TASK_CAP"
 )
 
 // 任务终态原因。
