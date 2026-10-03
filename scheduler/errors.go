@@ -14,6 +14,7 @@ const (
 	ReasonInsufficientRes     RejectReason = "INSUFFICIENT_RESOURCES"
 	ReasonConstraintConflict  RejectReason = "CONSTRAINT_CONFLICT"
 	ReasonPreemptionNotEnough RejectReason = "PREEMPTION_NOT_ENOUGH"
+	ReasonNoPreemptableVictim RejectReason = "NO_PREEMPTABLE_VICTIM"
 	ReasonNodeNotFound        RejectReason = "NODE_NOT_FOUND"
 	ReasonNoCandidates        RejectReason = "NO_CANDIDATE_NODES"
 	ReasonRunningTaskLimit    RejectReason = "RUNNING_TASK_LIMIT"

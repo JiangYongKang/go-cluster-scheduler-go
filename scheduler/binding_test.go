@@ -130,6 +130,83 @@ func TestPinnedGPUWithoutZoneCommitsHomeZone(t *testing.T) {
 	t.Logf("JUDGE pinned gpu1 task booked CPU/mem/GPU together in zone1")
 }
 
+// 无资源域（平铺）节点上钉设备：即使存在编号更靠前的空闲卡，
+// 也必须落在指名的那块卡上，绝不退回其它卡。
+func TestPinnedGPUFlatNodeExactDevice(t *testing.T) {
+	s := newTestScheduler(t, nil, nil)
+	mustAddNode(t, s, NodeSpec{
+		Name: "flat", CPU: 8, Memory: 8,
+		GPUs: []GPUDevice{{ID: "gpu0", NUMAID: -1}, {ID: "gpu1", NUMAID: -1}, {ID: "gpu2", NUMAID: -1}},
+	})
+	t.Logf("INPUT flat node (no NUMA) with free gpu0/gpu1/gpu2; task pins gpu1")
+	mustSubmit(t, s, JobSpec{ID: "j", User: "u1", Queue: "q1", Priority: 1,
+		Tasks: []TaskSpec{mkGPUTask("t", 1, 1, -1, "gpu1")}})
+	mustSchedule(t, s)
+	tk := s.GetJob("j").Tasks[0]
+	if tk.State != TaskRunning || tk.GPU != "gpu1" || tk.Node != "flat" {
+		t.Fatalf("pinned gpu1 must run on flat/gpu1, got node=%s gpu=%s state=%s",
+			tk.Node, tk.GPU, tk.State)
+	}
+	if tk.NUMAID != -1 {
+		t.Fatalf("flat node placement must not invent a NUMA zone, got %d", tk.NUMAID)
+	}
+	t.Logf("JUDGE pinned gpu1 honored on flat node despite gpu0 being free (gpu=%s)", tk.GPU)
+}
+
+// 平铺节点上钉的设备已被占用：GPU_BUSY，不许退回同节点其它空闲卡。
+func TestPinnedGPUFlatNodeBusyNoFallback(t *testing.T) {
+	s := newTestScheduler(t, nil, nil)
+	mustAddNode(t, s, NodeSpec{
+		Name: "flat", CPU: 8, Memory: 8,
+		GPUs: []GPUDevice{{ID: "gpu0", NUMAID: -1}, {ID: "gpu1", NUMAID: -1}},
+	})
+	mustSubmit(t, s, JobSpec{ID: "occ", User: "u9", Queue: "q1", Priority: 1,
+		Tasks: []TaskSpec{mkGPUTask("o", 1, 1, -1, "gpu1")}})
+	mustSchedule(t, s)
+	if tk := s.GetJob("occ").Tasks[0]; tk.GPU != "gpu1" {
+		t.Fatalf("setup: occupier must hold gpu1, got %s", tk.GPU)
+	}
+	t.Logf("INPUT flat node: gpu1 occupied, gpu0 free; second task pins gpu1")
+
+	mustSubmit(t, s, JobSpec{ID: "j", User: "u1", Queue: "q1", Priority: 1,
+		Tasks: []TaskSpec{mkGPUTask("t", 1, 1, -1, "gpu1")}})
+	rpt := mustSchedule(t, s)
+	u := unschedFor(rpt, "j")
+	if u == nil {
+		t.Fatalf("pinned busy gpu1 must be unschedulable (no fallback to gpu0)")
+	}
+	rs := u.NodeReasons["flat"]
+	if !containsReason(rs, FilterGPUBusy) {
+		t.Fatalf("want GPU_BUSY, got %v", rs)
+	}
+	if containsReason(rs, FilterGPUAbsent) {
+		t.Fatalf("gpu1 exists; must not report GPU_ABSENT: %v", rs)
+	}
+	t.Logf("JUDGE pinned gpu1 busy on flat node -> %v; never fell back to gpu0", rs)
+}
+
+// 平铺节点上钉的设备不存在：GPU_ABSENT，不许退回同节点其它空闲卡。
+func TestPinnedGPUFlatNodeAbsentNoFallback(t *testing.T) {
+	s := newTestScheduler(t, nil, nil)
+	mustAddNode(t, s, NodeSpec{
+		Name: "flat", CPU: 8, Memory: 8,
+		GPUs: []GPUDevice{{ID: "gpu0", NUMAID: -1}},
+	})
+	t.Logf("INPUT flat node has only gpu0; task pins missing gpu9")
+	mustSubmit(t, s, JobSpec{ID: "j", User: "u1", Queue: "q1", Priority: 1,
+		Tasks: []TaskSpec{mkGPUTask("t", 1, 1, -1, "gpu9")}})
+	rpt := mustSchedule(t, s)
+	u := unschedFor(rpt, "j")
+	if u == nil {
+		t.Fatalf("pinned absent gpu9 must be unschedulable (no fallback to gpu0)")
+	}
+	rs := u.NodeReasons["flat"]
+	if !containsReason(rs, FilterGPUAbsent) {
+		t.Fatalf("want GPU_ABSENT, got %v", rs)
+	}
+	t.Logf("JUDGE pinned gpu9 absent on flat node -> %v; never fell back to gpu0", rs)
+}
+
 // unschedFor 按作业 ID 取出本周期该作业的不可调度记录。
 func unschedFor(rpt *ScheduleReport, id string) *UnschedulableJob {
 	for i := range rpt.Unschedulable {

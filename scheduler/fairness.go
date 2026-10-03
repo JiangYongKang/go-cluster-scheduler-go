@@ -13,11 +13,17 @@ import (
 // 而非累计消耗：被抢占后正在等待重启的作业不持有运行份额以外的额外债务，
 // 不会因为历史消耗多（结算后剩余份额少）而一直被压着起不来。
 //
-// 抢占只允许针对严格更低优先级且仍在运行的任务；按整作业粒度贪心选取，
-// 找到可行集合后再做最小化剪枝。同优先级候选受害者之间按“已消耗资源份额”
-// 排序：累计消耗的资源时间越多、按用户/队列权重归一化后份额越大的作业越先
-// 被让出，避免“占得久、耗得多反而最安全”。抢占不改变任何用户的 allocated
-// 总量（运行份额转为等量预留），因此配额冲突无法、也不会通过抢占绕过。
+// 抢占按整作业粒度贪心选取受害者，找到可行集合后再做最小化剪枝。候选受害者
+// 分两类：
+//  1. 严格更低优先级且仍在运行的作业（原有语义不变）；
+//  2. 同优先级但“已消耗资源份额”严格大于抢占者的作业：累计消耗的资源时间
+//     越多、按用户/队列权重归一化后份额越大的作业越先让出，新来的份额小
+//     就能顶上去；消耗更少的一方绝不会被消耗更多的一方抢走。
+// 同优先级候选受害者之间也按已消耗份额降序让位。若一个可让出的受害者都没有，
+// 维持原状并以 NO_PREEMPTABLE_VICTIM 拒绝（与容量不足的
+// PREEMPTION_NOT_ENOUGH、硬约束冲突的 CONSTRAINT_CONFLICT 可区分）。
+// 抢占不改变任何用户的 allocated 总量（运行份额转为等量预留），因此配额冲突
+// 无法、也不会通过抢占绕过。
 
 func shareValue(r Resources) float64 {
 	return float64(r.CPU) + float64(r.Memory)/1024.0 + float64(r.GPU)*1024.0
@@ -102,21 +108,40 @@ func runningTasksOf(j *job) []*task {
 	return out
 }
 
-// preemptVictims 尝试通过抢占严格低优先级任务为 j 腾出整组放置。
-// 返回放置计划、受害者集合；失败时返回原因码与节点级细分原因。
+// preemptVictims 尝试通过抢占为 j 腾出整组放置。受害者候选：
+//   - 严格更低优先级且仍有运行中任务的作业；
+//   - 同优先级但归一化已消耗资源份额严格大于 j 的作业（份额小的新作业可以
+//     顶掉份额大的老作业；份额更小/相等的同优先级作业绝不被抢）。
+//
+// 返回放置计划、受害者集合；失败时返回原因码与节点级细分原因：
+// 无任何可让出的受害者时为 NO_PREEMPTABLE_VICTIM，最大范围抢占仍放不下时
+// 按容量/硬约束区分为 PREEMPTION_NOT_ENOUGH / CONSTRAINT_CONFLICT。
 func (s *Scheduler) preemptVictims(j *job) (map[*task]placeOn, map[*job]bool, RejectReason, string, map[string][]FilterReason) {
+	myShare := s.consumedShare(j, s.now)
 	candidates := make([]*job, 0)
+	var blockedSamePrio int // 同优先级但因份额不占优而不可让出的运行作业数
 	for _, id := range s.order {
 		v := s.jobs[id]
 		if v.spec.ID == j.spec.ID || v.state == JobFinished || v.state == JobCanceled {
 			continue
 		}
-		if v.spec.Priority < j.spec.Priority && len(runningTasksOf(v)) > 0 {
+		if len(runningTasksOf(v)) == 0 {
+			continue
+		}
+		switch {
+		case v.spec.Priority < j.spec.Priority:
 			candidates = append(candidates, v)
+		case v.spec.Priority == j.spec.Priority:
+			if s.consumedShare(v, s.now) > myShare {
+				candidates = append(candidates, v)
+			} else {
+				blockedSamePrio++
+			}
 		}
 	}
 	// 受害者选择顺序：
-	//  1. 低优先级优先（仅严格更低优先级候选会进入此列表）；
+	//  1. 优先级升序：越低优先级越先让出（同优先级候选因此排在所有更低
+	//     优先级候选之后，只有低优先级抢不够时才会动同优先级）；
 	//  2. 同优先级内按“已消耗资源份额”降序：累计资源时间（按用户/队列权重
 	//     归一化）越大的作业越先让出，长跑多耗者不再最安全；
 	//  3. 份额相同按作业 ID 升序，保证确定性。
@@ -154,6 +179,13 @@ func (s *Scheduler) preemptVictims(j *job) (map[*task]placeOn, map[*job]bool, Re
 		return nil, nil, ReasonOK, "no preemption needed", nil
 	}
 	baseReasons := reasons
+	if len(candidates) == 0 {
+		// 一个可让出的受害者都没有：维持原状，并给出可区分原因。
+		detail := sprintf("job %s: no preemptable victim (no lower-priority running job; "+
+			"%d same-priority running job(s) with consumed share not greater than mine)",
+			j.spec.ID, blockedSamePrio)
+		return nil, nil, ReasonNoPreemptableVictim, detail, baseReasons
+	}
 	for _, v := range candidates {
 		addJob(v)
 		if tryPlace() {
@@ -202,7 +234,7 @@ func (s *Scheduler) preemptVictims(j *job) (map[*task]placeOn, map[*job]bool, Re
 	if !ok {
 		return nil, nil, ReasonPreemptionNotEnough, "internal: minimized preemption set infeasible", r
 	}
-	return p, victims, ReasonOK, sprintf("preempt lower-priority jobs: %v", ids), nil
+	return p, victims, ReasonOK, sprintf("preempt victim jobs: %v", ids), nil
 }
 
 // classifyUnschedulable 依据节点级原因区分硬性约束冲突与容量/抢占不足。

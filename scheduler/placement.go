@@ -327,6 +327,17 @@ func (s *Scheduler) placementChoices(n *node, t TaskSpec, sim *simView, acc *nod
 		}
 		return out
 	}
+	// 非 NUMA（平铺）节点上钉设备：指名哪块就必须落在哪块；
+	// 设备不存在或已被占用时该节点无可行放置，绝不退回同节点其它空闲卡。
+	if t.Resources.GPU == 1 && t.GPUDevice != "" {
+		if _, ok := gpuOnNode(n, t.GPUDevice); !ok {
+			return nil
+		}
+		if e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
+			return nil
+		}
+		return []placeOn{{n: n, numaID: -1, gpu: t.GPUDevice}}
+	}
 	if t.Resources.GPU == 1 {
 		var ids []string
 		for _, g := range n.spec.GPUs {

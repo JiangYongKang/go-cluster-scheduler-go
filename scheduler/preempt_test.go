@@ -112,23 +112,28 @@ func TestPreemptionNotEnough(t *testing.T) {
 	t.Logf("JUDGE preemption infeasible leaves low untouched; reason=%s", rpt.Unschedulable[0].Reason)
 }
 
-// 同优先级作业不得抢占。
+// 同优先级且没有任何“已消耗份额更大”的可让出受害者时：维持原状，
+// 以可区分的 NO_PREEMPTABLE_VICTIM 拒绝（消耗更少/相等的一方不被抢）。
 func TestNoPreemptionAtSamePriority(t *testing.T) {
 	s := newTestScheduler(t, nil, nil)
 	mustAddNode(t, s, NodeSpec{Name: "n1", CPU: 4, Memory: 4})
 	mustSubmit(t, s, JobSpec{ID: "a", User: "u1", Queue: "q1", Priority: 5,
 		Tasks: []TaskSpec{mkTask("t", 4, 1)}})
 	mustSchedule(t, s)
+	// 不推进时钟：a 的已消耗份额为 0，不大于 b 的 0，构不成可让出受害者。
 	mustSubmit(t, s, JobSpec{ID: "b", User: "u2", Queue: "q1", Priority: 5,
 		Tasks: []TaskSpec{mkTask("t", 4, 1)}})
 	rpt := mustSchedule(t, s)
 	if len(rpt.PreemptedJobs) != 0 || len(rpt.StartedJobs) != 0 {
-		t.Fatalf("same priority must not preempt, got %+v", rpt)
+		t.Fatalf("same priority without bigger-consumed victim must not preempt, got %+v", rpt)
 	}
-	if rpt.Unschedulable[0].Reason != ReasonPreemptionNotEnough {
-		t.Fatalf("want PREEMPTION_NOT_ENOUGH, got %s", rpt.Unschedulable[0].Reason)
+	if rpt.Unschedulable[0].Reason != ReasonNoPreemptableVictim {
+		t.Fatalf("want NO_PREEMPTABLE_VICTIM, got %s", rpt.Unschedulable[0].Reason)
 	}
-	t.Logf("JUDGE same-priority job not preempted: %s", rpt.Unschedulable[0].Reason)
+	if st := s.GetJob("a").Tasks[0].State; st != TaskRunning {
+		t.Fatalf("a must keep running (status quo), got %s", st)
+	}
+	t.Logf("JUDGE no yieldable same-priority victim: %s; a untouched", rpt.Unschedulable[0].Reason)
 }
 
 // 多次抢占不重复计入：任务被抢占两次，runtime 为两段之和，份额始终只有一份预留。
