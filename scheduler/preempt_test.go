@@ -112,7 +112,8 @@ func TestPreemptionNotEnough(t *testing.T) {
 	t.Logf("JUDGE preemption infeasible leaves low untouched; reason=%s", rpt.Unschedulable[0].Reason)
 }
 
-// 同优先级作业不得抢占。
+// 同优先级、归一化已消耗份额相等（同时启动、瞬时消耗相同）时谁也不让，
+// 维持原状并给出可区分原因 NO_YIELDABLE_SHARE。
 func TestNoPreemptionAtSamePriority(t *testing.T) {
 	s := newTestScheduler(t, nil, nil)
 	mustAddNode(t, s, NodeSpec{Name: "n1", CPU: 4, Memory: 4})
@@ -121,14 +122,18 @@ func TestNoPreemptionAtSamePriority(t *testing.T) {
 	mustSchedule(t, s)
 	mustSubmit(t, s, JobSpec{ID: "b", User: "u2", Queue: "q1", Priority: 5,
 		Tasks: []TaskSpec{mkTask("t", 4, 1)}})
+	// 不推进时钟：a 的已消耗份额与 b 相同（b 为 0、a 尚未产生时长），不可让出。
 	rpt := mustSchedule(t, s)
 	if len(rpt.PreemptedJobs) != 0 || len(rpt.StartedJobs) != 0 {
-		t.Fatalf("same priority must not preempt, got %+v", rpt)
+		t.Fatalf("equal consumed share must not preempt, got %+v", rpt)
 	}
-	if rpt.Unschedulable[0].Reason != ReasonPreemptionNotEnough {
-		t.Fatalf("want PREEMPTION_NOT_ENOUGH, got %s", rpt.Unschedulable[0].Reason)
+	if rpt.Unschedulable[0].Reason != ReasonNoYieldableShare {
+		t.Fatalf("want NO_YIELDABLE_SHARE, got %s", rpt.Unschedulable[0].Reason)
 	}
-	t.Logf("JUDGE same-priority job not preempted: %s", rpt.Unschedulable[0].Reason)
+	if st := s.GetJob("a").Tasks[0].State; st != TaskRunning {
+		t.Fatalf("a must keep running, got %s", st)
+	}
+	t.Logf("JUDGE equal-consumed same-priority job not preempted: %s", rpt.Unschedulable[0].Reason)
 }
 
 // 多次抢占不重复计入：任务被抢占两次，runtime 为两段之和，份额始终只有一份预留。

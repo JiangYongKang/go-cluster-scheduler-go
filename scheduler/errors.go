@@ -14,10 +14,13 @@ const (
 	ReasonInsufficientRes     RejectReason = "INSUFFICIENT_RESOURCES"
 	ReasonConstraintConflict  RejectReason = "CONSTRAINT_CONFLICT"
 	ReasonPreemptionNotEnough RejectReason = "PREEMPTION_NOT_ENOUGH"
-	ReasonNodeNotFound        RejectReason = "NODE_NOT_FOUND"
-	ReasonNoCandidates        RejectReason = "NO_CANDIDATE_NODES"
-	ReasonRunningTaskLimit    RejectReason = "RUNNING_TASK_LIMIT"
-	ReasonNothingScheduled    RejectReason = "NOTHING_SCHEDULED"
+	// ReasonNoYieldableShare 表示同优先级中没有任何“归一化已消耗份额严格
+	// 更大”的运行中作业可以让出；份额更小或相同的一方不得被对方抢占。
+	ReasonNoYieldableShare RejectReason = "NO_YIELDABLE_SHARE"
+	ReasonNodeNotFound     RejectReason = "NODE_NOT_FOUND"
+	ReasonNoCandidates     RejectReason = "NO_CANDIDATE_NODES"
+	ReasonRunningTaskLimit RejectReason = "RUNNING_TASK_LIMIT"
+	ReasonNothingScheduled RejectReason = "NOTHING_SCHEDULED"
 )
 
 // 节点过滤细分原因（用于可解释日志）。

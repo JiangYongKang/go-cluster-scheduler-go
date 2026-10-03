@@ -283,7 +283,9 @@ func (s *Scheduler) CancelJob(id string) error {
 }
 
 // Schedule 执行一个调度周期：按优先级+公平共享排序待调度作业，
-// 对其全部待启动任务做整体放置；资源不足时尝试整体抢占严格更低优先级作业。
+// 对其全部待启动任务做整体放置；资源不足时尝试整体抢占严格更低优先级作业，
+// 或同优先级中归一化已消耗份额严格更大的作业（无人可让出时维持原状并以
+// NO_YIELDABLE_SHARE 给出可区分原因）。
 // 任何作业要么整体启动，要么不启动并给出可区分原因。
 func (s *Scheduler) Schedule() (*ScheduleReport, error) {
 	s.mu.Lock()

@@ -5,6 +5,10 @@ import "sort"
 // 拓扑放置：对作业的全部待启动任务做候选节点过滤与整体装箱。
 // 任一任务无可行放置则整个作业不启动（gang），并给出每个节点被排除的
 // 细分原因；绝不静默降级到违反约束的节点。
+//
+// 钉设备（TaskSpec.GPUDevice）在有无资源域两种节点上语义一致：钉哪块卡就
+// 落在哪块卡，设备不存在给 GPU_ABSENT、已占用给 GPU_BUSY；有资源域时设备
+// 不属于指定域给 GPU_ZONE_MISMATCH。任何情况下都不退回同节点其它设备。
 
 // simView 是放置预演视图：removed 中的任务（拟抢占的受害者）
 // 被视为已停止，节点可用资源相应回补，但调度器真实账本不变。
@@ -309,7 +313,8 @@ func (s *Scheduler) placementChoices(n *node, t TaskSpec, sim *simView, acc *nod
 		}
 		return []placeOn{{n: n, numaID: zid, gpu: t.GPUDevice}}
 	}
-	// 申请 GPU、不钉 NUMA：NUMA 节点逐域枚举，非 NUMA 节点取第一块空闲卡。
+	// 申请 GPU、不钉 NUMA：NUMA 节点逐域枚举；平铺（无资源域）节点上
+	// 钉设备必须落在指定卡，未钉设备才取编号最小的空闲卡，绝不退回其它卡。
 	if len(n.spec.NUMA) > 0 {
 		var out []placeOn
 		zones := append([]NUMAZone(nil), n.spec.NUMA...)
@@ -328,6 +333,15 @@ func (s *Scheduler) placementChoices(n *node, t TaskSpec, sim *simView, acc *nod
 		return out
 	}
 	if t.Resources.GPU == 1 {
+		// 平铺节点钉设备：设备即唯一合法放置。设备不存在/已占用已在
+		// filterNode 分别给出 GPU_ABSENT / GPU_BUSY，这里不改选其它卡。
+		if t.GPUDevice != "" {
+			if _, exists := gpuOnNode(n, t.GPUDevice); !exists ||
+				e.busyGPU[t.GPUDevice] || acc.gpus[t.GPUDevice] {
+				return nil
+			}
+			return []placeOn{{n: n, numaID: -1, gpu: t.GPUDevice}}
+		}
 		var ids []string
 		for _, g := range n.spec.GPUs {
 			if !e.busyGPU[g.ID] && !acc.gpus[g.ID] {
